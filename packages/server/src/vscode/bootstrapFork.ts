@@ -1,15 +1,18 @@
 import * as cp from "child_process";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
-import * as zlib from "zlib";
 import * as vm from "vm";
-import { isCli } from "../constants";
+import { logger } from "@coder/logger";
+import { buildDir, isCli } from "../constants";
 
 let ipcMsgBuffer: Buffer[] | undefined = [];
 let ipcMsgListener = process.send ? (d: Buffer): number => ipcMsgBuffer!.push(d) : undefined;
 if (ipcMsgListener) {
 	process.on("message", ipcMsgListener);
 }
+
+declare var __non_webpack_require__: typeof require;
 
 /**
  * Requires a module from the filesystem.
@@ -29,7 +32,7 @@ const requireFilesystemModule = (id: string, builtInExtensionsDir: string): any 
 		const fileName = id.endsWith(".js") ? id : `${id}.js`;
 		const req = vm.runInThisContext(mod.wrap(fs.readFileSync(fileName).toString()), {
 			displayErrors: true,
-			filename: id + fileName,
+			filename: fileName,
 		});
 		req(customMod.exports, customMod.require.bind(customMod), customMod, fileName, path.dirname(id));
 
@@ -39,46 +42,13 @@ const requireFilesystemModule = (id: string, builtInExtensionsDir: string): any 
 	return customMod.require(id);
 };
 
-/**
- * Called from forking a module
- */
-export const requireFork = (modulePath: string, args: string[], builtInExtensionsDir: string): void => {
-	const Module = require("module") as typeof import("module");
-	const oldRequire = Module.prototype.require;
-	// tslint:disable-next-line:no-any
-	Module.prototype.require = (id: string): any => {
-		if (id === "typescript") {
-			return require("typescript");
-		}
-
-		return oldRequire(id);
-	};
-
-	if (!process.send) {
-		throw new Error("No IPC messaging initialized");
-	}
-
-	process.argv = ["", "", ...args];
-
-	requireFilesystemModule(modulePath, builtInExtensionsDir);
-
-	if (ipcMsgBuffer && ipcMsgListener) {
-		process.removeListener("message", ipcMsgListener);
-		// tslint:disable-next-line:no-any
-		ipcMsgBuffer.forEach((i) => process.emit("message" as any, i as any));
-		ipcMsgBuffer = undefined;
-		ipcMsgListener = undefined;
-	}
-};
-
-export const requireModule = (modulePath: string, dataDir: string, builtInExtensionsDir: string): void => {
+export const requireModule = (modulePath: string, builtInExtensionsDir: string): void => {
 	process.env.AMD_ENTRYPOINT = modulePath;
 	const xml = require("xhr2");
 	xml.XMLHttpRequest.prototype._restrictedHeaders["user-agent"] = false;
 	// tslint:disable-next-line no-any this makes installing extensions work.
 	(global as any).XMLHttpRequest = xml.XMLHttpRequest;
 
-	const mod = require("module") as typeof import("module");
 	const promiseFinally = require("promise.prototype.finally") as { shim: () => void };
 	promiseFinally.shim();
 	/**
@@ -91,28 +61,16 @@ export const requireModule = (modulePath: string, dataDir: string, builtInExtens
 	};
 
 	if (isCli) {
-		/**
-		 * Needed for properly forking external modules within the CLI
-		 */
-		// tslint:disable-next-line:no-any
-		(<any>cp).fork = (modulePath: string, args: ReadonlyArray<string> = [], options?: cp.ForkOptions): cp.ChildProcess => {
-			return cp.spawn(process.execPath, ["--fork", modulePath, "--args", JSON.stringify(args), "--data-dir", dataDir], {
-				...options,
-				stdio: [null, null, null, "ipc"],
-			});
-		};
+		process.env.NBIN_BYPASS = "true";
 	}
 
-	let content: Buffer | undefined;
-	const readFile = (name: string): Buffer => {
-		return fs.readFileSync(path.join(process.env.BUILD_DIR as string || path.join(__dirname, "../.."), "./build", name));
-	};
+	const baseDir = path.join(buildDir, "build");
 	if (isCli) {
-		content = zlib.gunzipSync(readFile("bootstrap-fork.js.gz"));
+		__non_webpack_require__(path.join(baseDir, "bootstrap-fork.js.gz"));
 	} else {
-		content = readFile("../../vscode/out/bootstrap-fork.js");
+		// We need to check `isCli` here to confuse webpack.
+		require(path.join(__dirname, isCli ? "" : "../../../vscode/out/bootstrap-fork.js"));
 	}
-	eval(content.toString());
 };
 
 /**
@@ -123,27 +81,42 @@ export const requireModule = (modulePath: string, dataDir: string, builtInExtens
  * cp.stderr.on("data", (data) => console.log(data.toString("utf8")));
  * @param modulePath Path of the VS Code module to load.
  */
-export const forkModule = (modulePath: string, args: string[], options: cp.ForkOptions, dataDir?: string): cp.ChildProcess => {
-	let proc: cp.ChildProcess;
-	const forkArgs = ["--bootstrap-fork", modulePath];
-	if (args) {
-		forkArgs.push("--args", JSON.stringify(args));
-	}
-	if (options.env) {
-		// This prevents vscode from trying to load original-fs from electron.
-		delete options.env.ELECTRON_RUN_AS_NODE;
-		forkArgs.push("--env", JSON.stringify(options.env));
-	}
-	if (dataDir) {
-		forkArgs.push("--data-dir", dataDir);
-	}
+export const forkModule = (modulePath: string, args?: string[], options?: cp.ForkOptions, dataDir?: string): cp.ChildProcess => {
 	const forkOptions: cp.ForkOptions = {
 		stdio: [null, null, null, "ipc"],
 	};
+	if (options && options.env) {
+		// This prevents vscode from trying to load original-fs from electron.
+		delete options.env.ELECTRON_RUN_AS_NODE;
+		forkOptions.env = options.env;
+	}
+
+	const forkArgs = ["--bootstrap-fork", modulePath];
+	if (args) {
+		forkArgs.push("--extra-args", JSON.stringify(args));
+	}
+	if (dataDir) {
+		forkArgs.push("--user-data-dir", dataDir);
+	}
+
+	const nodeArgs = [];
 	if (isCli) {
-		proc = cp.spawn(process.execPath, forkArgs, forkOptions);
+		nodeArgs.push(path.join(buildDir, "out", "cli.js"));
 	} else {
-		proc = cp.spawn(process.execPath, ["--require", "ts-node/register", "--require", "tsconfig-paths/register", process.argv[1], ...forkArgs], forkOptions);
+		nodeArgs.push(
+			"--require", "ts-node/register",
+			"--require", "tsconfig-paths/register",
+			process.argv[1],
+		);
+	}
+
+	const proc = cp.spawn(process.execPath, [...nodeArgs, ...forkArgs], forkOptions);
+	if (args && args[0] === "--type=watcherService" && os.platform() === "linux") {
+		cp.exec(`renice -n 19 -p ${proc.pid}`, (error) => {
+			if (error) {
+				logger.warn(error.message);
+			}
+		});
 	}
 
 	return proc;

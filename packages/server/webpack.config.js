@@ -6,11 +6,10 @@ const root = path.resolve(__dirname, "../..");
 
 module.exports = merge(
 	require(path.join(root, "scripts/webpack.node.config.js"))({
-		// Config options.
+		dirname: __dirname,
 	}), {
 		output: {
 			filename: "cli.js",
-			path: path.join(__dirname, "out"),
 			libraryTarget: "commonjs",
 		},
 		node: {
@@ -22,12 +21,9 @@ module.exports = merge(
 			__dirname: false,
 			setImmediate: false
 		},
-		resolve: {
-			alias: {
-				"node-pty": "node-pty-prebuilt",
-			},
+		externals: {
+			"nbin": "commonjs nbin",
 		},
-		externals: ["tslib", "trash"],
 		entry: "./packages/server/src/cli.ts",
 		plugins: [
 			new webpack.DefinePlugin({

@@ -1,4 +1,5 @@
-import { readFile, writeFile, mkdir } from "fs";
+import { readFile, writeFile } from "fs";
+import { mkdirp } from "fs-extra";
 import * as path from "path";
 import { promisify } from "util";
 import { IDisposable } from "@coder/disposable";
@@ -9,6 +10,8 @@ import * as globalStorage from "vs/platform/storage/node/storageIpc";
 import { IStorageService, WillSaveStateReason } from "vs/platform/storage/common/storage";
 import * as paths from "./paths";
 import { workbench } from "../workbench";
+
+// tslint:disable completed-docs
 
 class StorageDatabase implements workspaceStorage.IStorageDatabase {
 	public readonly onDidChangeItemsExternal = Event.None;
@@ -25,7 +28,8 @@ class StorageDatabase implements workspaceStorage.IStorageDatabase {
 			}
 
 			this.triggerFlush(WillSaveStateReason.SHUTDOWN);
-			navigator.sendBeacon(`/resource${this.path}`, this.content);
+			const resourceBaseUrl = location.pathname.replace(/\/$/, "") + "/resource";
+			navigator.sendBeacon(`${resourceBaseUrl}/${this.path}`, this.content);
 		});
 	}
 
@@ -77,9 +81,7 @@ class StorageDatabase implements workspaceStorage.IStorageDatabase {
 	}
 
 	private async save(): Promise<void> {
-		try {
-			await promisify(mkdir)(path.dirname(this.path));
-		} catch (ex) {}
+		await mkdirp(path.dirname(this.path));
 
 		return promisify(writeFile)(this.path, this.content);
 	}
